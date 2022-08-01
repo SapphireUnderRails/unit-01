@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -23,9 +26,18 @@ type Parameters struct {
 	Length int64
 }
 
+// Creating a struct that will hold the channel array of allowed channels.
+type Channels struct {
+	Channels []string
+}
+
 // Globalizing the structs that hold this important data.
 var tokens Tokens
 var parameters Parameters
+var channels Channels
+
+// Global variable to hold the regex string, because why not?
+var re *regexp.Regexp
 
 // Main functions.
 func main() {
@@ -47,6 +59,21 @@ func main() {
 
 	// Unmarshal the tokens from the gp3ParametersFile.
 	json.Unmarshal(parametersFile, &parameters)
+
+	// Retrieve the channels from the channels.json file.
+	channelsFile, err := os.ReadFile("channels.json")
+	if err != nil {
+		log.Fatal("COULD NOT READ 'channels.json' FILE: ", err)
+	}
+
+	// Unmarshal the channels from channelsFile.
+	json.Unmarshal(channelsFile, &channels)
+
+	// Compile regex string.
+	re, err = regexp.Compile(`([\w+]+\:\/\/)?([\w\d-]+\.)*[\w-]+[\.\:]\w+([\/\?\=\&\#\.]?[\w-]+)*\/?`)
+	if err != nil {
+		log.Fatal("COULD NOT COMPILE REGEX: ", err)
+	}
 
 	// Create a new Discord session using the provided bot token.
 	session, err := discordgo.New("Bot " + tokens.DiscordToken)
@@ -71,17 +98,20 @@ func main() {
 	for i, command := range commands {
 		registered_command, err := session.ApplicationCommandCreate(session.State.User.ID, "1001077854936760352", command)
 		if err != nil {
-			log.Panicf("CANNOT CREATE '%v' COMMAND: %v", command.Name, err)
+			log.Printf("CANNOT CREATE '%v' COMMAND: %v", command.Name, err)
 		}
 		registeredCommands[i] = registered_command
 	}
 
-	// Looping through the array of handlers and adding them to the session.
+	// Looping through the array of interaction handlers and adding them to the session.
 	session.AddHandler(func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
 		if handler, ok := commandHandlers[interaction.ApplicationCommandData().Name]; ok {
 			handler(session, interaction)
 		}
 	})
+
+	// Add the messageCreate handler to the session.
+	session.AddHandler(messageCreate)
 
 	// Wait here until CTRL-C or other term signal is received.
 	fmt.Println("Bot is now running.  Press CTRL-C to exit.")
@@ -93,7 +123,7 @@ func main() {
 	for _, v := range registeredCommands {
 		err := session.ApplicationCommandDelete(session.State.User.ID, "1001077854936760352", v.ID)
 		if err != nil {
-			log.Panicf("CANNOT DELETE '%v' COMMAND: %v", v.Name, err)
+			log.Printf("CANNOT DELETE '%v' COMMAND: %v", v.Name, err)
 		}
 	}
 
@@ -164,6 +194,34 @@ var commands = []*discordgo.ApplicationCommand{
 			},
 		},
 	},
+	{
+		Name:                     "pop_channel",
+		Description:              "This removes a channel from the list of channels Shem-Ha is allowed to reply in.",
+		DefaultMemberPermissions: &defaultMemberPermissions,
+
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionChannel,
+				Name:        "channel",
+				Description: "The channel that you want to remove from the list of approved channels.",
+				Required:    true,
+			},
+		},
+	},
+	{
+		Name:                     "append_channel",
+		Description:              "This adds a channel to the list of channels Shem-Ha is allowed to reply in.",
+		DefaultMemberPermissions: &defaultMemberPermissions,
+
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionChannel,
+				Name:        "channel",
+				Description: "The channel that you want to add to the list of approved channels.",
+				Required:    true,
+			},
+		},
+	},
 }
 
 // Creating a map of event handlers to respond to application commands.
@@ -205,7 +263,7 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 		// Marshall the new parameters to save.
 		jsonBytes, err := json.Marshal(parameters)
 		if err != nil {
-			log.Panicln("ERROR MARSHALING JSON: ", err)
+			log.Println("ERROR MARSHALING JSON: ", err)
 
 			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -247,7 +305,7 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 		// Marshall the new parameters to save.
 		jsonBytes, err := json.Marshal(parameters)
 		if err != nil {
-			log.Panicln("ERROR MARSHALING JSON: ", err)
+			log.Println("ERROR MARSHALING JSON: ", err)
 
 			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -262,7 +320,7 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 		// Save updated parameters into parameters.json.
 		err = os.WriteFile("parameters.json", jsonBytes, 0644)
 		if err != nil {
-			log.Panicln("ERROR SAVING JSON: ", err)
+			log.Println("ERROR SAVING JSON: ", err)
 
 			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -283,4 +341,155 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 			},
 		})
 	},
+	"pop_channel": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+		// Snagging the target channel ID.
+		targetChannelName := interaction.ApplicationCommandData().Options[0].ChannelValue(session).Name
+		targetChannelID := interaction.ApplicationCommandData().Options[0].ChannelValue(session).ID
+
+		// Remove channel from the list of channels allowed.
+		channels.Channels = removeStringFromArray(targetChannelID, channels.Channels)
+
+		// Marshall the new channels to save.
+		jsonBytes, err := json.Marshal(channels)
+		if err != nil {
+			log.Println("ERROR MARSHALING JSON: ", err)
+
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("FAILED TO UPDATE CHANNELS: %v", err),
+				},
+			})
+
+			return
+		}
+
+		// Save updated parameters into parameters.json.
+		err = os.WriteFile("channels.json", jsonBytes, 0644)
+		if err != nil {
+			log.Println("ERROR SAVING JSON: ", err)
+
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("FAILED TO UPDATE CHANNELS: %v", err),
+				},
+			})
+
+			return
+		}
+
+		// Responding to the interaction.
+		//https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+		session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("Successfully removed '%v' from the list of channels I am allowed to respond in.", targetChannelName),
+			},
+		})
+	},
+	"append_channel": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+		// Snagging the target channel ID.
+		targetChannelName := interaction.ApplicationCommandData().Options[0].ChannelValue(session).Name
+		targetChannelID := interaction.ApplicationCommandData().Options[0].ChannelValue(session).ID
+
+		// Add channel to the list of channels allowed.
+		channels.Channels = append(channels.Channels, targetChannelID)
+
+		// Marshall the new channels to save.
+		jsonBytes, err := json.Marshal(channels)
+		if err != nil {
+			log.Println("ERROR MARSHALING JSON: ", err)
+
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("FAILED TO UPDATE CHANNELS: %v", err),
+				},
+			})
+
+			return
+		}
+
+		// Save updated parameters into parameters.json.
+		err = os.WriteFile("channels.json", jsonBytes, 0644)
+		if err != nil {
+			log.Println("ERROR SAVING JSON: ", err)
+
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("FAILED TO UPDATE CHANNELS: %v", err),
+				},
+			})
+
+			return
+		}
+
+		// Responding to the interaction.
+		//https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+		session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("Successfully added '%v' to the list of channels I am allowed to respond in.", targetChannelName),
+			},
+		})
+	},
+}
+
+func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
+	// Ignore all messages that were created by the bot itself.
+	if message.Author.ID == session.State.User.ID {
+		return
+	}
+
+	// Ignore all messages with the discriminator #0000 (Webhooks).
+	if message.WebhookID != "" {
+		return
+	}
+
+	// Filter out all URLs in the message.
+	message_content := re.ReplaceAllString(message.Content, "")
+
+	// Ultimately ignore all messages with no content in them.
+	if message_content == "" {
+		return
+	}
+
+	// Check if the bot is allowed to respond in this channel.
+	contains := stringInArray(message.ChannelID, channels.Channels)
+	if contains {
+		// Craeting and seeding the random number generator.
+		random := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+		// Generating the chance to repond to the message.
+		chance := random.Float64()
+
+		// Logging the chance to repond to the message.
+		log.Println("CHANCE: ", chance*100.0)
+		if chance*100 < parameters.Chance*1.0 {
+			// Build an embed to act as a reply to the message since I can't find an obvious way to turn off mentions.
+			embedAuthor := discordgo.MessageEmbedAuthor{}
+			embedAuthor.Name = fmt.Sprintf("%s#%s", message.Author.Username, message.Author.Discriminator)
+			embedAuthor.IconURL = message.Author.AvatarURL("128")
+
+			embed := discordgo.MessageEmbed{}
+			embed.Color = message.Author.AccentColor
+			embed.Description = message.Content
+			embed.Author = &embedAuthor
+
+			// session.ChannelMessageSendEmbed(message.ChannelID, &embed)
+
+			// msg := discordgo.MessageSend{}
+			msg := discordgo.MessageSend{}
+			msg.Content = fmt.Sprintln(chance*100.0) + "⤵️ "
+			msg.Embeds = append(msg.Embeds, &embed)
+
+			// https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.ChannelMessageSendComplex
+			_, err := session.ChannelMessageSendComplex(message.ChannelID, &msg)
+			if err != nil {
+				log.Printf("COULD NOT REPLY TO %v: %v", message, err)
+			}
+		}
+	}
 }
