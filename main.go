@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	gogpt3 "github.com/sashabaranov/go-gpt3"
 )
 
 // Creating a struct to hold the two tokens.
@@ -151,6 +153,28 @@ var commands = []*discordgo.ApplicationCommand{
 		DefaultMemberPermissions: &defaultMemberPermissions,
 	},
 	{
+		Name:                     "echo",
+		Description:              "This echoes your text to the specified channel as Shem-Ha.",
+		DefaultMemberPermissions: &defaultMemberPermissions,
+
+		// Registering the option available for this command.
+		// https://pkg.go.dev/github.com/bwmarrin/discordgo#ApplicationCommandOption
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionChannel,
+				Name:        "channel",
+				Description: "This is the specified channel that you want to echo your message to.",
+				Required:    true,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "text",
+				Description: "This is the text that you want Shem-Ha to echo.",
+				Required:    true,
+			},
+		},
+	},
+	{
 		Name:                     "get_chance",
 		Description:              "This returns the value of the chance that Shem-Ha will respond to a message.",
 		DefaultMemberPermissions: &defaultMemberPermissions,
@@ -198,7 +222,8 @@ var commands = []*discordgo.ApplicationCommand{
 		Name:                     "pop_channel",
 		Description:              "This removes a channel from the list of channels Shem-Ha is allowed to reply in.",
 		DefaultMemberPermissions: &defaultMemberPermissions,
-
+		// Registering the option available for this command.
+		// https://pkg.go.dev/github.com/bwmarrin/discordgo#ApplicationCommandOption
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionChannel,
@@ -212,7 +237,8 @@ var commands = []*discordgo.ApplicationCommand{
 		Name:                     "append_channel",
 		Description:              "This adds a channel to the list of channels Shem-Ha is allowed to reply in.",
 		DefaultMemberPermissions: &defaultMemberPermissions,
-
+		// Registering the option available for this command.
+		// https://pkg.go.dev/github.com/bwmarrin/discordgo#ApplicationCommandOption
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionChannel,
@@ -234,6 +260,24 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
 				Content: "Congrats on using the test command!",
+			},
+		})
+	},
+	"echo": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+		// Grabbing the channel ID and the content of the message to echo.
+		channel := interaction.ApplicationCommandData().Options[0].ChannelValue(session)
+		content := interaction.ApplicationCommandData().Options[1].StringValue()
+		msg, err := session.ChannelMessageSend(channel.ID, content)
+		if err != nil {
+			log.Printf("COULD NOT SEND MESSAGE '%v': %v", msg, err)
+		}
+
+		// Responding to the interaction.
+		//https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+		session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("Successfully sent '%v' to channel '%v'", content, channel.Name),
 			},
 		})
 	},
@@ -459,6 +503,13 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	// Check if the bot is allowed to respond in this channel.
 	contains := stringInArray(message.ChannelID, channels.Channels)
 	if contains {
+		startChatLog := fmt.Sprintf(`The following is a conversation with an AI assistant named Shem-Ha. Shem-Ha acts like an arrogant goddess.
+		%v: Hello. My name is %v.
+		Shem-Ha: I am Shem-Ha.
+		%v: %v
+		Shem-Ha: `,
+			message.Author.Username, message.Author.Username, message.Author.Username, message_content)
+
 		// Craeting and seeding the random number generator.
 		random := rand.New(rand.NewSource(time.Now().UnixNano()))
 
@@ -478,15 +529,32 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 			embed.Description = message.Content
 			embed.Author = &embedAuthor
 
-			// session.ChannelMessageSendEmbed(message.ChannelID, &embed)
+			// Creating the GPT3 client.
+			client := gogpt3.NewClient(tokens.GPT3Token)
+			ctx := context.Background()
+
+			// Building a completion request from GPT3.
+			stops := []string{"\n"}
+			req := gogpt3.CompletionRequest{
+				MaxTokens: int(parameters.Length),
+				Prompt:    startChatLog,
+				Stop:      stops,
+			}
+
+			response, err := client.CreateCompletion(ctx, "davinci", req)
+			if err != nil {
+				log.Println("COULD NOT COMPLETE A GPT3 COMPLETION: ", err)
+				return
+			}
+			res := response.Choices[0].Text
 
 			// msg := discordgo.MessageSend{}
 			msg := discordgo.MessageSend{}
-			msg.Content = fmt.Sprintln(chance*100.0) + "⤵️ "
+			msg.Content = res + " ⤵️ "
 			msg.Embeds = append(msg.Embeds, &embed)
 
 			// https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.ChannelMessageSendComplex
-			_, err := session.ChannelMessageSendComplex(message.ChannelID, &msg)
+			_, err = session.ChannelMessageSendComplex(message.ChannelID, &msg)
 			if err != nil {
 				log.Printf("COULD NOT REPLY TO %v: %v", message, err)
 			}
