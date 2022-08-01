@@ -121,13 +121,13 @@ func main() {
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
-	// Lopping through the registeredCommands array and deleting all the commands.
-	for _, v := range registeredCommands {
-		err := session.ApplicationCommandDelete(session.State.User.ID, "1001077854936760352", v.ID)
-		if err != nil {
-			log.Printf("CANNOT DELETE '%v' COMMAND: %v", v.Name, err)
-		}
-	}
+	// // Lopping through the registeredCommands array and deleting all the commands.
+	// for _, v := range registeredCommands {
+	// 	err := session.ApplicationCommandDelete(session.State.User.ID, "1001077854936760352", v.ID)
+	// 	if err != nil {
+	// 		log.Printf("CANNOT DELETE '%v' COMMAND: %v", v.Name, err)
+	// 	}
+	// }
 
 	// Cleanly close down the Discord session.
 	session.Close()
@@ -150,6 +150,11 @@ var commands = []*discordgo.ApplicationCommand{
 	{
 		Name:                     "test",
 		Description:              "This is just a test command!",
+		DefaultMemberPermissions: &defaultMemberPermissions,
+	},
+	{
+		Name:                     "list_channels",
+		Description:              "This command shows all the channels that Shem-Ha is allowed to post in.",
 		DefaultMemberPermissions: &defaultMemberPermissions,
 	},
 	{
@@ -210,7 +215,7 @@ var commands = []*discordgo.ApplicationCommand{
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionInteger,
-				Name:        "percentage",
+				Name:        "tokens",
 				Description: "This is the maximum response length in tokens. A token is about 4 characters.",
 				Required:    true,
 				MinValue:    &minLengthValue,
@@ -390,6 +395,18 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 		targetChannelName := interaction.ApplicationCommandData().Options[0].ChannelValue(session).Name
 		targetChannelID := interaction.ApplicationCommandData().Options[0].ChannelValue(session).ID
 
+		// Checking if channel is already in the list of approved channels.
+		if !stringInArray(targetChannelID, channels.Channels) {
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("Channel '%v' is not in the list of approved channels.", targetChannelName),
+				},
+			})
+
+			return
+		}
+
 		// Remove channel from the list of channels allowed.
 		channels.Channels = removeStringFromArray(targetChannelID, channels.Channels)
 
@@ -433,9 +450,22 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 		})
 	},
 	"append_channel": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+
 		// Snagging the target channel ID.
 		targetChannelName := interaction.ApplicationCommandData().Options[0].ChannelValue(session).Name
 		targetChannelID := interaction.ApplicationCommandData().Options[0].ChannelValue(session).ID
+
+		// Checking if channel is already in the list of approved channels.
+		if stringInArray(targetChannelID, channels.Channels) {
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("Channel '%v' is already in the list of approved channels.", targetChannelName),
+				},
+			})
+
+			return
+		}
 
 		// Add channel to the list of channels allowed.
 		channels.Channels = append(channels.Channels, targetChannelID)
@@ -479,6 +509,45 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 			},
 		})
 	},
+	"list_channels": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+
+		if len(channels.Channels) > 0 {
+			chnls := ""
+			for _, channelID := range channels.Channels {
+				channel, err := session.Channel(channelID)
+				if err != nil {
+					log.Println("ERROR RETREIVING CHANNELS: ", err)
+
+					session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionResponseChannelMessageWithSource,
+						Data: &discordgo.InteractionResponseData{
+							Content: fmt.Sprintf("FAILED TO GET CHANNELS: %v", err),
+						},
+					})
+					return
+				}
+
+				chnls += channel.Name + "\n"
+			}
+
+			// Responding to the interaction.
+			//https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: chnls,
+				},
+			})
+		} else {
+			session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "CHANNEL LIST IS EMPTY",
+				},
+			})
+		}
+
+	},
 }
 
 func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
@@ -505,7 +574,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	if contains {
 		startChatLog := fmt.Sprintf(`The following is a conversation with an AI assistant named Shem-Ha. Shem-Ha acts like an arrogant goddess.
 		%v: Hello. My name is %v.
-		Shem-Ha: I am Shem-Ha.
+		Shem-Ha: I am Shem-Ha. What do you want human?
 		%v: %v
 		Shem-Ha: `,
 			message.Author.Username, message.Author.Username, message.Author.Username, message_content)
@@ -536,9 +605,10 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 			// Building a completion request from GPT3.
 			stops := []string{"\n"}
 			req := gogpt3.CompletionRequest{
-				MaxTokens: int(parameters.Length),
-				Prompt:    startChatLog,
-				Stop:      stops,
+				MaxTokens:   int(parameters.Length),
+				Prompt:      startChatLog,
+				Stop:        stops,
+				Temperature: 1.0,
 			}
 
 			response, err := client.CreateCompletion(ctx, "davinci", req)
@@ -560,4 +630,26 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 			}
 		}
 	}
+}
+
+// Function to check if a string is in an array, returns true or false.
+func stringInArray(str string, list []string) bool {
+	for _, i := range list {
+		if i == str {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Function to remove a string from an array, returning the newly updated array.
+func removeStringFromArray(str string, list []string) []string {
+	for i, j := range list {
+		if j == str {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+
+	return list
 }
