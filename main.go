@@ -121,13 +121,13 @@ func main() {
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
-	// // Lopping through the registeredCommands array and deleting all the commands.
-	// for _, v := range registeredCommands {
-	// 	err := session.ApplicationCommandDelete(session.State.User.ID, "1001077854936760352", v.ID)
-	// 	if err != nil {
-	// 		log.Printf("CANNOT DELETE '%v' COMMAND: %v", v.Name, err)
-	// 	}
-	// }
+	// Lopping through the registeredCommands array and deleting all the commands.
+	for _, v := range registeredCommands {
+		err := session.ApplicationCommandDelete(session.State.User.ID, "1001077854936760352", v.ID)
+		if err != nil {
+			log.Printf("CANNOT DELETE '%v' COMMAND: %v", v.Name, err)
+		}
+	}
 
 	// Cleanly close down the Discord session.
 	session.Close()
@@ -573,10 +573,10 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	contains := stringInArray(message.ChannelID, channels.Channels)
 	if contains {
 		startChatLog := fmt.Sprintf(`The following is a conversation with an AI assistant named Shem-Ha. Shem-Ha acts like an arrogant goddess.
-		%v: Hello. My name is %v.
-		Shem-Ha: I am Shem-Ha. What do you want human?
-		%v: %v
-		Shem-Ha: `,
+			%v: Hello. My name is %v.
+			Shem-Ha: I am Shem-Ha. What do you want human?
+			%v: %v
+			Shem-Ha: `,
 			message.Author.Username, message.Author.Username, message.Author.Username, message_content)
 
 		// Craeting and seeding the random number generator.
@@ -588,43 +588,48 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		// Logging the chance to repond to the message.
 		log.Println("CHANCE: ", chance*100.0)
 		if chance*100 < parameters.Chance*1.0 {
-			// Build an embed to act as a reply to the message since I can't find an obvious way to turn off mentions.
-			embedAuthor := discordgo.MessageEmbedAuthor{}
-			embedAuthor.Name = fmt.Sprintf("%s#%s", message.Author.Username, message.Author.Discriminator)
-			embedAuthor.IconURL = message.Author.AvatarURL("128")
-
-			embed := discordgo.MessageEmbed{}
-			embed.Color = message.Author.AccentColor
-			embed.Description = message.Content
-			embed.Author = &embedAuthor
-
 			// Creating the GPT3 client.
 			client := gogpt3.NewClient(tokens.GPT3Token)
 			ctx := context.Background()
 
 			// Building a completion request from GPT3.
-			stops := []string{"\n"}
+			stops := []string{"\n", message.Author.Username}
 			req := gogpt3.CompletionRequest{
-				MaxTokens:   int(parameters.Length),
-				Prompt:      startChatLog,
-				Stop:        stops,
-				Temperature: 1.0,
+				Model:            "davinci",
+				MaxTokens:        int(parameters.Length),
+				Prompt:           startChatLog,
+				Stop:             stops,
+				Temperature:      1.0,
+				TopP:             1.0,
+				FrequencyPenalty: 0.5,
+				PresencePenalty:  0.5,
+				BestOf:           1,
 			}
 
-			response, err := client.CreateCompletion(ctx, "davinci", req)
+			response, err := client.CreateCompletion(ctx, req)
 			if err != nil {
 				log.Println("COULD NOT COMPLETE A GPT3 COMPLETION: ", err)
 				return
 			}
 			res := response.Choices[0].Text
 
-			// msg := discordgo.MessageSend{}
-			msg := discordgo.MessageSend{}
-			msg.Content = res + " ⤵️ "
-			msg.Embeds = append(msg.Embeds, &embed)
+			// headers := make(map[string]string)
+			// headers["Authorization:"] = fmt.Sprintf("Bearer %v", tokens.GPT3Token)
+			// client := &http.Client{}
+			// request, _ := http.NewRequest("GET", "https://api.openai.com/v1/models", nil)
+			// request.Header.Set("Authorization", fmt.Sprintf("Bearer %v", tokens.GPT3Token))
+			// response, _ := client.Do(request)
+			// body, _ := io.ReadAll(response.Body)
+			// log.Println(string(body))
 
 			// https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.ChannelMessageSendComplex
-			_, err = session.ChannelMessageSendComplex(message.ChannelID, &msg)
+			_, err = session.ChannelMessageSendComplex(message.ChannelID, &discordgo.MessageSend{
+				Content:   res,
+				Reference: message.Reference(),
+				AllowedMentions: &discordgo.MessageAllowedMentions{
+					Parse: nil,
+				},
+			})
 			if err != nil {
 				log.Printf("COULD NOT REPLY TO %v: %v", message, err)
 			}
