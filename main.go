@@ -613,14 +613,19 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 			}
 			res := response.Choices[0].Text
 
-			// headers := make(map[string]string)
-			// headers["Authorization:"] = fmt.Sprintf("Bearer %v", tokens.GPT3Token)
-			// client := &http.Client{}
-			// request, _ := http.NewRequest("GET", "https://api.openai.com/v1/models", nil)
-			// request.Header.Set("Authorization", fmt.Sprintf("Bearer %v", tokens.GPT3Token))
-			// response, _ := client.Do(request)
-			// body, _ := io.ReadAll(response.Body)
-			// log.Println(string(body))
+			mod := gogpt3.ModerationRequest{
+				Input: res,
+			}
+
+			moderation, err := client.Moderations(ctx, mod)
+			if err != nil {
+				log.Println("COULD NOT COMPLETE A GPT3 MODERATION COMPLETION: ", err)
+				return
+			}
+
+			if moderation.Results[0].Flagged {
+				return
+			}
 
 			// https://pkg.go.dev/github.com/bwmarrin/discordgo#Session.ChannelMessageSendComplex
 			_, err = session.ChannelMessageSendComplex(message.ChannelID, &discordgo.MessageSend{
